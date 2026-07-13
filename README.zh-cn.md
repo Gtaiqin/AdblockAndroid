@@ -1,6 +1,6 @@
 # AdblockAndroid
 
-[![](https://jitpack.io/v/Edsuns/AdblockAndroid.svg)](https://jitpack.io/#Edsuns/AdblockAndroid)
+[![](https://jitpack.io/v/Gtaiqin/AdblockAndroid.svg)](https://jitpack.io/#Gtaiqin/AdblockAndroid)
 
 *[English](README.md) | 简体中文*
 
@@ -30,7 +30,7 @@
 
 ## 示例
 
-请查看 [releases](https://github.com/Edsuns/AdblockAndroid/releases) 和 `app/src`里的代码。
+请查看 [releases](https://github.com/Gtaiqin/AdblockAndroid/releases) 和 `app/src`里的代码。
 
 ## 快速上手
 
@@ -55,7 +55,7 @@ allprojects {
 
 ```groovy
 dependencies {
-    implementation 'com.github.Edsuns.AdblockAndroid:ad-filter:1.0'
+    implementation 'com.github.Gtaiqin.AdblockAndroid:ad-filter:1.1.0'
 }
 ```
 

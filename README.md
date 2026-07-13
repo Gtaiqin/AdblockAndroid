@@ -1,6 +1,6 @@
 # AdblockAndroid
 
-[![](https://jitpack.io/v/Edsuns/AdblockAndroid.svg)](https://jitpack.io/#Edsuns/AdblockAndroid)
+[![](https://jitpack.io/v/Gtaiqin/AdblockAndroid.svg)](https://jitpack.io/#Gtaiqin/AdblockAndroid)
 
 *English | [简体中文](README.zh-cn.md)*
 
@@ -30,7 +30,7 @@ The native C++ code is based on [brave/ad-block](https://github.com/brave/ad-blo
 
 ## Demo
 
-See [releases](https://github.com/Edsuns/AdblockAndroid/releases) and the code in `app/src`.
+See [releases](https://github.com/Gtaiqin/AdblockAndroid/releases) and the code in `app/src`.
 
 ## Get Started
 
@@ -55,7 +55,7 @@ Add the dependency:
 
 ```groovy
 dependencies {
-    implementation 'com.github.Edsuns.AdblockAndroid:ad-filter:1.0'
+    implementation 'com.github.Gtaiqin.AdblockAndroid:ad-filter:1.1.0'
 }
 ```
 
