@@ -38,11 +38,17 @@ class App : Application() {
             return
         }
 
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+            return
+        }
+
         val clazz = if (finished) MainActivity::class.java else SettingsActivity::class.java
         val intent = Intent(this, clazz).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, 0)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent, PendingIntent.FLAG_IMMUTABLE
+        )
 
         val builder = NotificationCompat.Builder(this, channelId).apply {
             setContentTitle(getString(R.string.filter_download))
