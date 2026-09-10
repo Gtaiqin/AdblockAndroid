@@ -15,10 +15,16 @@ import io.github.edsuns.adfilter.impl.Constants.TAG_INSTALLATION
 import io.github.edsuns.adfilter.util.None
 import io.github.edsuns.adfilter.workers.DownloadWorker
 import io.github.edsuns.adfilter.workers.InstallationWorker
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import timber.log.Timber
+import java.util.concurrent.TimeUnit
 
 /**
  * Created by Edsuns@qq.com on 2021/7/29.
@@ -38,6 +44,15 @@ internal class FilterViewModelImpl constructor(
 
     private val workManager: WorkManager = WorkManager.getInstance(context)
 
+    /**
+     * Scope for one-off bookkeeping work. This view model is a process-wide singleton, so the
+     * scope intentionally lives as long as the process.
+     */
+    private val reconciliationScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO +
+            CoroutineExceptionHandler { _, e -> Timber.e(e, "Work state reconciliation failed") }
+    )
+
     override val workInfo: LiveData<List<WorkInfo>> =
         workManager.getWorkInfosByTagLiveData(TAG_FILTER_WORK)
 
@@ -47,7 +62,8 @@ internal class FilterViewModelImpl constructor(
     override val enabledFilterCount: LiveData<Int> = MutableLiveData()
 
     internal fun updateEnabledFilterCount() {
-        (enabledFilterCount as MutableLiveData).value = filterDataLoader.detector.clients.size
+        // postValue so this can be called from the loader threads as well as the main thread
+        (enabledFilterCount as MutableLiveData).postValue(filterDataLoader.detector.clients.size)
     }
 
     /**
@@ -84,19 +100,43 @@ internal class FilterViewModelImpl constructor(
     init {
         workManager.pruneWork()
         // clear bad running download state
-        filters.value?.values?.forEach {
-            if (it.downloadState.isRunning) {
-                val list = workManager.getWorkInfosForUniqueWork(it.id).get()
-                if (list == null || list.isEmpty()) {
-                    it.downloadState = DownloadState.FAILED
+        reconcileRunningDownloadState()
+    }
+
+    /**
+     * Reconciles the persisted [Filter.downloadState] with the actual state of the
+     * corresponding unique work.
+     *
+     * This MUST NOT run on the main thread. [WorkManager.getWorkInfosForUniqueWork] returns a
+     * [com.google.common.util.concurrent.ListenableFuture] which is completed by WorkManager's
+     * own background executor. Blocking the caller with `Future.get()` risks an ANR, and if that
+     * executor never gets a chance to run (e.g. WorkManager is still initializing, or the query is
+     * issued from a worker thread) the future may never complete, freezing the UI forever.
+     */
+    private fun reconcileRunningDownloadState() {
+        val running = filters.value?.values?.filter { it.downloadState.isRunning }.orEmpty()
+        if (running.isEmpty()) {
+            return
+        }
+        reconciliationScope.launch {
+            running.forEach { filter ->
+                val list = try {
+                    // bounded wait: a stuck query must never block the reconciliation forever
+                    workManager.getWorkInfosForUniqueWork(filter.id)
+                        .get(WORK_INFO_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                } catch (e: Exception) {
+                    // on failure/timeout keep the persisted state instead of misreporting it
+                    Timber.w(e, "Failed to query work info for filter ${filter.id}")
+                    return@forEach
+                }
+                if (list.isEmpty()) {
+                    filter.downloadState = DownloadState.FAILED
                     flushFilter()
-                } else {
-                    if (list[0].state == WorkInfo.State.ENQUEUED
-                        && it.downloadState != DownloadState.ENQUEUED
-                    ) {
-                        it.downloadState = DownloadState.ENQUEUED
-                        flushFilter()
-                    }
+                } else if (list[0].state == WorkInfo.State.ENQUEUED
+                    && filter.downloadState != DownloadState.ENQUEUED
+                ) {
+                    filter.downloadState = DownloadState.ENQUEUED
+                    flushFilter()
                 }
             }
         }
@@ -115,9 +155,10 @@ internal class FilterViewModelImpl constructor(
 
     override fun removeFilter(id: String) {
         cancelDownload(id)
-        filterDataLoader.remove(id)
         filterMap.value?.remove(id)
         flushFilter()
+        // deleting the stored files and releasing the native client must not block the caller
+        filterDataLoader.scope.launch { filterDataLoader.removeAsync(id) }
     }
 
     override fun setFilterEnabled(id: String, enabled: Boolean, post: Boolean) {
@@ -137,12 +178,17 @@ internal class FilterViewModelImpl constructor(
     }
 
     internal fun enableFilter(filter: Filter) {
-        if (isEnabled.value == true && filter.filtersCount > 0) {
-            filterDataLoader.load(filter.id)
-            filter.isEnabled = true
+        if (isEnabled.value != true || filter.filtersCount <= 0) {
+            return
+        }
+        // Update the cheap in-memory state right away so the UI reacts immediately; reading the
+        // preprocessed data from disk and parsing it natively happens on a background thread.
+        filter.isEnabled = true
+        // notify onDirty
+        (onDirty as MutableLiveData).postValue(None.Value)
+        filterDataLoader.scope.launch {
+            filterDataLoader.loadAsync(filter.id)
             updateEnabledFilterCount()
-            // notify onDirty
-            (onDirty as MutableLiveData).value = None.Value
         }
     }
 
@@ -165,7 +211,9 @@ internal class FilterViewModelImpl constructor(
 
     override fun enableCustomFilter() {
         if (!isCustomFilterEnabled()) {
-            filterDataLoader.load(FilterDataLoader.ID_CUSTOM)
+            filterDataLoader.scope.launch {
+                filterDataLoader.loadAsync(FilterDataLoader.ID_CUSTOM)
+            }
         }
     }
 
@@ -236,5 +284,11 @@ internal class FilterViewModelImpl constructor(
 
     companion object {
         private const val TAG_FILTER_WORK = "TAG_FILTER_WORK"
+
+        /**
+         * Upper bound for a single [WorkManager.getWorkInfosForUniqueWork] query when reconciling
+         * persisted download state.
+         */
+        private const val WORK_INFO_TIMEOUT_SECONDS = 10L
     }
 }

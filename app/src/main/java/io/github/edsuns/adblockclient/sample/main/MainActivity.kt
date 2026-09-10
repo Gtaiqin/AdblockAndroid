@@ -119,11 +119,12 @@ class MainActivity : AppCompatActivity(), WebViewClientListener {
             ) {
                 val urlIn = urlText.text.toString()
                 webView.loadUrl(
-                    urlIn.smartUrlFilter() ?: URLUtil.composeSearchUrl(
+                    /*urlIn.smartUrlFilter() ?: URLUtil.composeSearchUrl(
                         urlIn,
                         "https://www.bing.com/search?q={}",
                         "{}"
-                    )
+                    )*/
+                    "https://m.zhaoshuge.com/read_107728/1509016.html"
                 )
                 webView.requestFocus()
                 urlText.hideKeyboard()

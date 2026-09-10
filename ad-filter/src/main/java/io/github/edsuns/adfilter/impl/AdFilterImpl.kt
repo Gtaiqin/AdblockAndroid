@@ -20,6 +20,7 @@ import io.github.edsuns.adfilter.script.ScriptInjection
 import io.github.edsuns.adfilter.script.Scriptlet
 import io.github.edsuns.adfilter.util.None
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -37,7 +38,19 @@ internal class AdFilterImpl constructor(appContext: Context) : AdFilter {
     private val elementHiding: ElementHiding = ElementHiding(detector)
     private val scriptlet: Scriptlet = Scriptlet(detector)
 
-    override val customFilter = filterDataLoader.getCustomFilter()
+    @Volatile
+    private var cachedCustomFilter: CustomFilter? = null
+
+    /**
+     * Custom filter.
+     *
+     * Reading the raw rules from disk is a blocking operation, so it is pre-loaded on a background
+     * thread in [init] and only falls back to a synchronous read if this is accessed before the
+     * pre-load finished. The main thread is therefore not blocked during startup.
+     */
+    override val customFilter: CustomFilter
+        get() = cachedCustomFilter ?: filterDataLoader.getCustomFilter()
+            .also { cachedCustomFilter = it }
 
     override val viewModel = FilterViewModelImpl(appContext, filterDataLoader)
 
@@ -45,6 +58,10 @@ internal class AdFilterImpl constructor(appContext: Context) : AdFilter {
         get() = viewModel.sharedPreferences.hasInstallation
 
     init {
+        // pre-load the custom rules off the main thread
+        filterDataLoader.scope.launch {
+            cachedCustomFilter = filterDataLoader.getCustomFilterAsync()
+        }
         viewModel.isEnabled.observeForever { enable ->
             if (enable) {
                 viewModel.filters.value?.values?.forEach {
@@ -52,7 +69,10 @@ internal class AdFilterImpl constructor(appContext: Context) : AdFilter {
                         viewModel.enableFilter(it)
                     }
                 }
-                filterDataLoader.load(FilterDataLoader.ID_CUSTOM)
+                // loading the custom client is a blocking disk/native operation
+                filterDataLoader.scope.launch {
+                    filterDataLoader.loadAsync(FilterDataLoader.ID_CUSTOM)
+                }
             } else {
                 filterDataLoader.unloadAll()
                 filterDataLoader.unloadCustomFilter()

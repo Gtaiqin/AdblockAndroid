@@ -29,6 +29,9 @@ internal class DetectorImpl : Detector {
     override val clients = CopyOnWriteArrayList<Client>()
 
     // null means disabled
+    // Written from the loader thread (see FilterDataLoader) and read from the WebView thread,
+    // so it must be volatile to be safely published.
+    @Volatile
     override var customFilterClient: Client? = null
         set(value) {
             if (value != null) {
