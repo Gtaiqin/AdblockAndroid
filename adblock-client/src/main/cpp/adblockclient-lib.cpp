@@ -1,6 +1,33 @@
 #include <jni.h>
 #include "third-party/ad-block/ad_block_client.h"
 
+/**
+ * Copies a Java byte array into a newly allocated, NUL-terminated char buffer.
+ *
+ * AdBlockClient::parse() and AdBlockClient::deserialize() treat their input as a C string and only
+ * stop at '\0'. A Java byte array carries no terminator, so without the extra byte the parser walks
+ * past the end of the allocation and reads unmapped memory, crashing with
+ * "SIGSEGV, code 2 (SEGV_ACCERR)". Whether that happened used to depend on the heap layout, which
+ * made it an intermittent crash.
+ *
+ * The caller owns the returned buffer and must release it with delete[].
+ *
+ * @param outLength receives the payload length, excluding the terminator.
+ */
+static char *copyAsCString(JNIEnv *env, jbyteArray data, int *outLength) {
+    int dataLength = env->GetArrayLength(data);
+    if (dataLength < 0) {
+        dataLength = 0;
+    }
+    char *dataChars = new char[static_cast<size_t>(dataLength) + 1];
+    if (dataLength > 0) {
+        env->GetByteArrayRegion(data, 0, dataLength, reinterpret_cast<jbyte *>(dataChars));
+    }
+    dataChars[dataLength] = '\0';
+    *outLength = dataLength;
+    return dataChars;
+}
+
 extern "C"
 JNIEXPORT jlong
 JNICALL
@@ -55,12 +82,15 @@ Java_io_github_edsuns_adblockclient_AdBlockClient_loadBasicData(JNIEnv *env,
                                                                 jlong clientPointer,
                                                                 jbyteArray data,
                                                                 jboolean preserveRules) {
-    int dataLength = env->GetArrayLength(data);
-    char *dataChars = new char[dataLength];
-    env->GetByteArrayRegion(data, 0, dataLength, reinterpret_cast<jbyte *>(dataChars));
+    int dataLength;
+    char *dataChars = copyAsCString(env, data, &dataLength);
 
-    auto *client = (AdBlockClient *) clientPointer;
-    client->parse(dataChars, preserveRules);
+    // Guard against empty input: AdBlockClient::parse() starts scanning at input + 1, so it would
+    // read past a buffer that holds only the terminator.
+    if (dataLength > 0) {
+        auto *client = (AdBlockClient *) clientPointer;
+        client->parse(dataChars, preserveRules);
+    }
 
     return (long) dataChars;
 }
@@ -72,12 +102,13 @@ Java_io_github_edsuns_adblockclient_AdBlockClient_loadProcessedData(JNIEnv *env,
                                                                     jobject /* this */,
                                                                     jlong clientPointer,
                                                                     jbyteArray data) {
-    int dataLength = env->GetArrayLength(data);
-    char *dataChars = new char[dataLength];
-    env->GetByteArrayRegion(data, 0, dataLength, reinterpret_cast<jbyte *>(dataChars));
+    int dataLength;
+    char *dataChars = copyAsCString(env, data, &dataLength);
 
-    auto *client = (AdBlockClient *) clientPointer;
-    client->deserialize(dataChars);
+    if (dataLength > 0) {
+        auto *client = (AdBlockClient *) clientPointer;
+        client->deserialize(dataChars);
+    }
 
     // We cannot delete dataChars here as adblock keeps a ptr to it.
     // Instead we send back a ptr ref so we can delete it later in the release method
