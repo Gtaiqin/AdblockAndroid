@@ -28,6 +28,32 @@ import org.junit.Test
  */
 class AdBlockClientTest {
 
+    @Test
+    fun closingTemporaryParserPreservesSerializedData() {
+        val processed = AdBlockClient("temporary").use { client ->
+            client.loadBasicData(data(), true)
+            client.getProcessedData()
+        }
+        AdBlockClient("loaded").use { client ->
+            client.loadProcessedData(processed)
+            assertTrue(client.matches(trackerUrl, documentUrl, resourceType).shouldBlock)
+        }
+    }
+
+    @Test
+    fun closeIsIdempotentAndClosedClientCannotReachNativeCode() {
+        val client = AdBlockClient("closed")
+        client.loadBasicData(data(), true)
+        client.close()
+        client.close()
+        try {
+            client.getFiltersCount()
+            fail("Closed native client must not be accessed")
+        } catch (_: IllegalStateException) {
+            // Expected: guard fails in Kotlin, before dereferencing the native pointer.
+        }
+    }
+
     companion object {
         private const val id = "test"
         private const val documentUrl = "http://example.com"

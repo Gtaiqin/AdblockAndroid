@@ -18,6 +18,7 @@ package io.github.edsuns.adblockclient
 
 import android.net.Uri
 import timber.log.Timber
+import java.io.Closeable
 
 
 /**
@@ -27,8 +28,14 @@ import timber.log.Timber
  *
  * Reference: [github.com/duckduckgo/Android/releases/tag/5.38.1](https://github.com/duckduckgo/Android/releases/tag/5.38.1)
  */
-class AdBlockClient(override val id: String) : Client {
+class AdBlockClient(override val id: String) : Client, Closeable {
 
+    private var closed = false
+    private val activePointer: Long
+        get() {
+            check(!closed) { "AdBlockClient is closed" }
+            return nativeClientPointer
+        }
     private val nativeClientPointer: Long
     private var rawDataPointer: Long
     private var processedDataPointer: Long
@@ -44,16 +51,19 @@ class AdBlockClient(override val id: String) : Client {
     /**
      * @param data requires UTF-8 bytes
      */
+    @Synchronized
     fun loadBasicData(data: ByteArray, preserveRules: Boolean = false) {
         val timestamp = System.currentTimeMillis()
         Timber.d("Loading basic data for $id")
-        rawDataPointer = loadBasicData(nativeClientPointer, data, preserveRules)
+        rawDataPointer = loadBasicData(activePointer, data, preserveRules)
         Timber.d("Loading basic data for $id completed in ${System.currentTimeMillis() - timestamp}ms")
     }
 
+    @get:Synchronized
+    @set:Synchronized
     override var isGenericElementHidingEnabled: Boolean
-        get() = isGenericElementHidingEnabled(nativeClientPointer)
-        set(value) = setGenericElementHidingEnabled(nativeClientPointer, value)
+        get() = isGenericElementHidingEnabled(activePointer)
+        set(value) = setGenericElementHidingEnabled(activePointer, value)
 
     private external fun isGenericElementHidingEnabled(clientPointer: Long): Boolean
 
@@ -65,30 +75,34 @@ class AdBlockClient(override val id: String) : Client {
         preserveRules: Boolean
     ): Long
 
+    @Synchronized
     fun loadProcessedData(data: ByteArray) {
         val timestamp = System.currentTimeMillis()
         Timber.d("Loading preprocessed data for $id")
-        processedDataPointer = loadProcessedData(nativeClientPointer, data)
+        processedDataPointer = loadProcessedData(activePointer, data)
         Timber.d("Loading preprocessed data for $id completed in ${System.currentTimeMillis() - timestamp}ms")
     }
 
     private external fun loadProcessedData(clientPointer: Long, data: ByteArray): Long
 
-    fun getProcessedData(): ByteArray = getProcessedData(nativeClientPointer)
+    @Synchronized
+    fun getProcessedData(): ByteArray = getProcessedData(activePointer)
 
     private external fun getProcessedData(clientPointer: Long): ByteArray
 
-    fun getFiltersCount(): Int = getFiltersCount(nativeClientPointer)
+    @Synchronized
+    fun getFiltersCount(): Int = getFiltersCount(activePointer)
 
     private external fun getFiltersCount(clientPointer: Long): Int
 
+    @Synchronized
     override fun matches(
         url: String,
         documentUrl: String,
         resourceType: ResourceType
     ): MatchResult {
         val firstPartyDomain = documentUrl.baseHost() ?: return MatchResult(false, null, null)
-        return matches(nativeClientPointer, url, firstPartyDomain, resourceType.filterOption)
+        return matches(activePointer, url, firstPartyDomain, resourceType.filterOption)
     }
 
     private external fun matches(
@@ -98,17 +112,21 @@ class AdBlockClient(override val id: String) : Client {
         filterOption: Int
     ): MatchResult
 
+    @Synchronized
     override fun getElementHidingSelectors(url: String): String? =
-        getElementHidingSelectors(nativeClientPointer, url)
+        getElementHidingSelectors(activePointer, url)
 
+    @Synchronized
     override fun getExtendedCssSelectors(url: String): Array<String>? =
-        getExtendedCssSelectors(nativeClientPointer, url)
+        getExtendedCssSelectors(activePointer, url)
 
+    @Synchronized
     override fun getCssRules(url: String): Array<String>? =
-        getCssRules(nativeClientPointer, url)
+        getCssRules(activePointer, url)
 
+    @Synchronized
     override fun getScriptlets(url: String): Array<String>? =
-        getScriptlets(nativeClientPointer, url)
+        getScriptlets(activePointer, url)
 
     private external fun getElementHidingSelectors(clientPointer: Long, url: String): String?
 
@@ -119,8 +137,16 @@ class AdBlockClient(override val id: String) : Client {
     private external fun getScriptlets(clientPointer: Long, url: String): Array<String>?
 
     @Suppress("unused", "protectedInFinal")
-    protected fun finalize() {
+    protected fun finalize() = close()
+
+    /** Close temporary parsing clients promptly. Detector-owned clients retain GC cleanup. */
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
         releaseClient(nativeClientPointer, rawDataPointer, processedDataPointer)
+        rawDataPointer = 0
+        processedDataPointer = 0
     }
 
     private external fun releaseClient(

@@ -70,8 +70,6 @@ dependencies {
 
     implementation "androidx.work:work-runtime-ktx:2.10.0"
 
-    implementation 'com.github.Edsuns:HttpRequest:0.2'
-
     implementation "com.github.Edsuns.Mezzanine:mezzanine:$mezzanineVersion"
     kapt "com.github.Edsuns.Mezzanine:mezzanine-compiler:$mezzanineVersion"
 }

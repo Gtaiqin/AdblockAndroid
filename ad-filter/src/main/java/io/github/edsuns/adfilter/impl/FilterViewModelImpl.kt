@@ -232,7 +232,8 @@ internal class FilterViewModelImpl constructor(
                 .build()
             val inputData = workDataOf(
                 KEY_FILTER_ID to it.id,
-                KEY_DOWNLOAD_URL to it.url
+                KEY_DOWNLOAD_URL to it.url,
+                KEY_RAW_CHECKSUM to it.checksum
             )
             val download =
                 OneTimeWorkRequestBuilder<DownloadWorker>()

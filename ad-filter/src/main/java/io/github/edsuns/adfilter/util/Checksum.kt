@@ -29,14 +29,8 @@ class Checksum(val filter: String) {
 
     private fun calculateChecksum(data: String): String =
         Base64.encodeToString(
-            md5(normalize(data).toByteArray()),
+            ChecksumNormalizer.digest(data, checksumRegexp),
             Base64.NO_PADDING or Base64.NO_WRAP
         )
 
-    private fun normalize(data: String): String {
-        var normalize = data.replace("\r", "")
-        normalize = Regex("\n+").replace(normalize, "\n")
-        normalize = checksumRegexp.replaceFirst(normalize, "")
-        return normalize
-    }
 }

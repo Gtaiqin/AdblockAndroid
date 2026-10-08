@@ -1,52 +1,59 @@
 package io.github.edsuns.adfilter.workers
 
 import android.content.Context
-import androidx.work.Worker
+import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import io.github.edsuns.adfilter.AdFilter
 import io.github.edsuns.adfilter.impl.AdFilterImpl
+import io.github.edsuns.adfilter.impl.Constants.KEY_ALREADY_UP_TO_DATE
 import io.github.edsuns.adfilter.impl.Constants.KEY_DOWNLOADED_DATA
+import io.github.edsuns.adfilter.impl.Constants.KEY_DOWNLOAD_ETAG
 import io.github.edsuns.adfilter.impl.Constants.KEY_DOWNLOAD_URL
 import io.github.edsuns.adfilter.impl.Constants.KEY_FILTER_ID
-import io.github.edsuns.net.HttpRequest
+import io.github.edsuns.adfilter.impl.Constants.KEY_RAW_CHECKSUM
+import io.github.edsuns.adfilter.impl.FilterWorkCoordinator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runInterruptible
 import timber.log.Timber
 import java.io.IOException
-import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.currentCoroutineContext
 
-/**
- * Created by Edsuns@qq.com on 2021/1/1.
- */
-internal class DownloadWorker(context: Context, params: WorkerParameters) : Worker(
-    context,
-    params
-) {
-    private val binaryDataStore = (AdFilter.get(applicationContext) as AdFilterImpl).binaryDataStore
+internal class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    private val store = (AdFilter.get(applicationContext) as AdFilterImpl).binaryDataStore
 
-    override fun doWork(): Result {
-        val id = inputData.getString(KEY_FILTER_ID) ?: return Result.failure()
+    override suspend fun doWork(): Result {
+        val filterId = inputData.getString(KEY_FILTER_ID) ?: return Result.failure()
         val url = inputData.getString(KEY_DOWNLOAD_URL) ?: return Result.failure()
-        Timber.v("Start download: $url $id")
+        val checksum = inputData.getString(KEY_RAW_CHECKSUM).orEmpty()
+        // Work UUID isolates cancellation/retries from a replacement download of the same filter.
+        val dataName = "_${filterId}_$id"
+        val context = currentCoroutineContext()
+        var completed = false
         try {
-            val request = HttpRequest(url).timeout(10000).get()
-            if (request.isBadStatus) {
-                Timber.v("Failed to download (${request.status}): $url $id")
-                return Result.failure(inputData)
+            val result = FilterWorkCoordinator.download {
+                runInterruptible(Dispatchers.IO) {
+                    val etag = store.installedEtag(filterId, url, checksum)
+                    FilterDownloader(FilterWorkCoordinator.MAX_SOURCE_BYTES, { context.ensureActive() })
+                        .download(url, etag) { write -> store.saveData(dataName, write) }
+                }
             }
-            // convert to UTF-8 if needed
-            val bodyBytes =
-                if (request.encoding == StandardCharsets.UTF_8) request.bodyBytes else request.body.toByteArray()
-            val dataName = "_$id"
-            binaryDataStore.saveData(dataName, bodyBytes)
-            return Result.success(
-                workDataOf(
-                    KEY_FILTER_ID to id,
-                    KEY_DOWNLOADED_DATA to dataName
-                )
+            context.ensureActive()
+            val output = workDataOf(
+                KEY_FILTER_ID to filterId,
+                KEY_DOWNLOAD_URL to url,
+                KEY_DOWNLOADED_DATA to dataName,
+                KEY_DOWNLOAD_ETAG to result.etag,
+                KEY_ALREADY_UP_TO_DATE to result.notModified
             )
+            completed = true
+            return Result.success(output)
         } catch (e: IOException) {
-            Timber.v(e, "Failed to download: $url $id")
+            Timber.w(e, "Failed to download filter: $filterId")
+            return Result.failure(inputData)
+        } finally {
+            if (!completed) store.clearData(dataName)
         }
-        return Result.failure(inputData)
     }
 }

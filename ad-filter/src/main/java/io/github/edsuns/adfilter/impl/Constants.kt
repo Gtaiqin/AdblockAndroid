@@ -8,6 +8,7 @@ internal object Constants {
     const val KEY_FILTER_ID = "KEY_FILTER_ID"
     const val KEY_DOWNLOAD_URL = "KEY_DOWNLOAD_URL"
     const val KEY_DOWNLOADED_DATA = "KEY_DOWNLOADED_DATA"
+    const val KEY_DOWNLOAD_ETAG = "KEY_DOWNLOAD_ETAG"
     const val TAG_INSTALLATION = "TAG_INSTALLATION"
     const val KEY_FILTER_NAME = "KEY_FILTER_NAME"
     const val KEY_FILTERS_COUNT = "KEY_FILTERS_COUNT"
