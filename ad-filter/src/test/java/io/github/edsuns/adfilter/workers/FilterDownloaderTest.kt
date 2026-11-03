@@ -6,6 +6,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.concurrent.CancellationException
 import java.util.zip.GZIPOutputStream
@@ -121,5 +122,41 @@ class FilterDownloaderTest {
         }).download("https://example.test/old", "\"v1\"") { fail("must not write") }
         assertEquals("\"v1\"", second.getRequestProperty("If-None-Match"))
         assertTrue(first.disconnected && second.disconnected)
+    }
+
+    @Test fun `throttling and server errors are retryable while client errors are not`() {
+        val transient = listOf(408, 425, 429, 500, 502, 503, 504)
+        for (code in transient + listOf(400, 401, 403, 404, 410)) {
+            val connection = Connection(code = code)
+            val e = assertThrows(FilterDownloadException::class.java) {
+                FilterDownloader(1000, connect = { connection })
+                    .download("https://example.test/filter", null) { fail("must not write") }
+            }
+            assertEquals("HTTP $code", code in transient, e.retryable)
+        }
+    }
+
+    @Test fun `connection failures are retryable`() {
+        val e = assertThrows(FilterDownloadException::class.java) {
+            FilterDownloader(1000, connect = { throw SocketTimeoutException("timeout") })
+                .download("https://example.test/filter", null) { fail("must not write") }
+        }
+        assertTrue(e.retryable)
+    }
+
+    @Test fun `unusable payloads are not retryable`() {
+        val payloads = listOf(
+            byteArrayOf(),                 // empty body
+            byteArrayOf(65, 0, 66),        // embedded NUL
+            byteArrayOf(0xc3.toByte())     // malformed UTF-8
+        )
+        for (bytes in payloads) {
+            val connection = Connection(bytes = bytes)
+            val e = assertThrows(FilterDownloadException::class.java) {
+                FilterDownloader(1000, connect = { connection })
+                    .download("https://example.test/filter", null) { it(ByteArrayOutputStream()) }
+            }
+            assertFalse(e.retryable)
+        }
     }
 }

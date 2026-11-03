@@ -238,6 +238,14 @@ internal class FilterViewModelImpl constructor(
             val download =
                 OneTimeWorkRequestBuilder<DownloadWorker>()
                     .setConstraints(constraints)
+                    // A weak network recovers on its own within seconds to a couple of minutes;
+                    // retrying with exponential backoff (10s, 20s, 40s) is what turns a transient
+                    // timeout into a successful download instead of an immediate user-visible error.
+                    .setBackoffCriteria(
+                        BackoffPolicy.EXPONENTIAL,
+                        MIN_DOWNLOAD_BACKOFF_SECONDS,
+                        TimeUnit.SECONDS
+                    )
                     .addTag(TAG_FILTER_WORK)
                     .setInputData(inputData)
                     .build()
@@ -291,5 +299,8 @@ internal class FilterViewModelImpl constructor(
          * persisted download state.
          */
         private const val WORK_INFO_TIMEOUT_SECONDS = 10L
+
+        /** WorkManager's own minimum; the first retry happens after 10s, then 20s, 40s... */
+        private const val MIN_DOWNLOAD_BACKOFF_SECONDS = 10L
     }
 }

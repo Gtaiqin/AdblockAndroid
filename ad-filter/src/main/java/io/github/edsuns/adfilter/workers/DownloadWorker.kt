@@ -50,10 +50,25 @@ internal class DownloadWorker(context: Context, params: WorkerParameters) : Coro
             completed = true
             return Result.success(output)
         } catch (e: IOException) {
-            Timber.w(e, "Failed to download filter: $filterId")
+            // Weak or unstable networks fail transiently (timeouts, resets, DNS, HTTP 5xx). Those
+            // attempts are retried by WorkManager with exponential backoff, which also keeps the
+            // network constraint in effect so a dropped connection waits instead of failing.
+            // Unusable sources (HTTP 4xx, malformed payload) fail immediately.
+            val attempts = runAttemptCount + 1
+            val retryable = (e as? FilterDownloadException)?.retryable != false
+            if (retryable && attempts < MAX_ATTEMPTS) {
+                Timber.w(e, "Failed to download filter, attempt $attempts/$MAX_ATTEMPTS: $filterId")
+                return Result.retry()
+            }
+            Timber.w(e, "Failed to download filter after $attempts attempt(s): $filterId")
             return Result.failure(inputData)
         } finally {
             if (!completed) store.clearData(dataName)
         }
+    }
+
+    companion object {
+        /** Total attempts per download: the initial try plus [MAX_ATTEMPTS] - 1 backoff retries. */
+        const val MAX_ATTEMPTS = 4
     }
 }

@@ -8,10 +8,25 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
+import java.net.MalformedURLException
 import java.net.URL
+import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 import java.util.zip.GZIPInputStream
+
+/**
+ * Download failure carrying whether another attempt can succeed.
+ *
+ * On weak or unstable networks the usual failures are timeouts, connection resets, DNS errors,
+ * HTTP 5xx/429 and truncated bodies; all of them are worth retrying. An unusable source (HTTP
+ * 4xx, oversized or malformed payload) is not, so retries do not waste the user's time and battery.
+ */
+internal class FilterDownloadException(
+    message: String,
+    val retryable: Boolean,
+    cause: Throwable? = null
+) : IOException(message, cause)
 
 /** Never buffers a response body in memory. The caller owns atomic file publication. */
 internal class FilterDownloader(
@@ -26,38 +41,70 @@ internal class FilterDownloader(
         etag: String?,
         write: ((OutputStream) -> Unit) -> Unit
     ): Response {
-        var url = URL(address)
-        repeat(11) { redirect ->
+        val start = try {
+            URL(address)
+        } catch (e: MalformedURLException) {
+            throw FilterDownloadException("Invalid filter URL", retryable = false, e)
+        }
+        try {
+            return download(start, etag, write)
+        } catch (e: FilterDownloadException) {
+            throw e
+        } catch (e: IOException) {
+            // Timeouts, resets, DNS failures and truncated bodies are transient on weak networks.
+            throw FilterDownloadException(e.message ?: "Filter download failed", retryable = true, e)
+        }
+    }
+
+    private fun download(
+        start: URL,
+        etag: String?,
+        write: ((OutputStream) -> Unit) -> Unit
+    ): Response {
+        var url = start
+        repeat(MAX_REDIRECTS + 1) { redirect ->
             checkActive()
             if (url.protocol != "http" && url.protocol != "https") {
-                throw IOException("Unsupported filter URL protocol")
+                throw FilterDownloadException("Unsupported filter URL protocol", retryable = false)
             }
             val connection = connect(url)
             try {
-                connection.connectTimeout = 10_000
-                connection.readTimeout = 10_000
+                connection.connectTimeout = CONNECT_TIMEOUT_MILLIS
+                connection.readTimeout = READ_TIMEOUT_MILLIS
                 connection.instanceFollowRedirects = false
                 connection.setRequestProperty("Accept-Encoding", "gzip")
                 connection.setRequestProperty("User-Agent", "AdFilter/1.0")
                 if (etag != null) connection.setRequestProperty("If-None-Match", etag)
                 val status = connection.responseCode
-                if (status in listOf(301, 302, 303, 307, 308)) {
-                    if (redirect == 10) throw IOException("Too many filter redirects")
+                if (status in REDIRECT_STATUSES) {
+                    if (redirect == MAX_REDIRECTS) {
+                        throw FilterDownloadException("Too many filter redirects", retryable = false)
+                    }
                     val location = connection.getHeaderField("Location")
-                        ?: throw IOException("Missing redirect location")
-                    url = URL(url, location)
+                        ?: throw FilterDownloadException("Missing redirect location", retryable = false)
+                    url = try {
+                        URL(url, location)
+                    } catch (e: MalformedURLException) {
+                        throw FilterDownloadException("Invalid redirect location", retryable = false, e)
+                    }
                 } else {
                     if (status == HttpURLConnection.HTTP_NOT_MODIFIED && etag != null) {
                         return Response(true, etag)
                     }
                     // Do not read error bodies, partial responses, or unexpected empty responses.
-                    if (status != HttpURLConnection.HTTP_OK) throw IOException("Filter HTTP $status")
+                    if (status != HttpURLConnection.HTTP_OK) {
+                        throw FilterDownloadException(
+                            "Filter HTTP $status", retryable = isRetryableStatus(status)
+                        )
+                    }
                     val charset = responseCharset(connection.contentType)
                     connection.inputStream.use { raw ->
                         val decoded = when (connection.contentEncoding?.lowercase()?.trim()) {
                             null, "", "identity" -> raw
                             "gzip" -> GZIPInputStream(raw)
-                            else -> throw IOException("Unsupported filter content encoding")
+                            else -> throw FilterDownloadException(
+                                "Unsupported filter content encoding", retryable = false
+                            )
                         }
                         decoded.use { input ->
                             write { output -> transcode(input, output, charset) }
@@ -71,8 +118,12 @@ internal class FilterDownloader(
                 connection.disconnect()
             }
         }
-        throw IOException("Too many filter redirects")
+        throw FilterDownloadException("Too many filter redirects", retryable = false)
     }
+
+    /** Server-side throttling and outages recover on their own; client errors do not. */
+    private fun isRetryableStatus(status: Int): Boolean =
+        status == 408 || status == 425 || status == 429 || status >= 500
 
     internal fun transcode(input: InputStream, output: OutputStream, charset: Charset) {
         val limitedInput = object : FilterInputStream(input) {
@@ -80,14 +131,18 @@ internal class FilterDownloader(
             override fun read(): Int {
                 checkActive()
                 val value = super.read()
-                if (value >= 0 && ++count > maxBytes) throw IOException("Filter input exceeds limit")
+                if (value >= 0 && ++count > maxBytes) {
+                    throw FilterDownloadException("Filter input exceeds limit", retryable = false)
+                }
                 return value
             }
             override fun read(b: ByteArray, off: Int, len: Int): Int {
                 checkActive()
                 val n = `in`.read(b, off, minOf(len.toLong(), maxBytes - count + 1).toInt())
                 if (n > 0) count += n
-                if (count > maxBytes) throw IOException("Filter input exceeds limit")
+                if (count > maxBytes) {
+                    throw FilterDownloadException("Filter input exceeds limit", retryable = false)
+                }
                 return n
             }
         }
@@ -95,12 +150,16 @@ internal class FilterDownloader(
             var count = 0L
             override fun write(value: Int) {
                 checkActive()
-                if (++count > maxBytes) throw IOException("Filter output exceeds limit")
+                if (++count > maxBytes) {
+                    throw FilterDownloadException("Filter output exceeds limit", retryable = false)
+                }
                 out.write(value)
             }
             override fun write(b: ByteArray, off: Int, len: Int) {
                 checkActive()
-                if (len > maxBytes - count) throw IOException("Filter output exceeds limit")
+                if (len > maxBytes - count) {
+                    throw FilterDownloadException("Filter output exceeds limit", retryable = false)
+                }
                 out.write(b, off, len)
                 count += len
             }
@@ -112,16 +171,23 @@ internal class FilterDownloader(
         val writer = OutputStreamWriter(limitedOutput, Charsets.UTF_8)
         val buffer = CharArray(8192)
         var total = 0L
-        while (true) {
-            checkActive()
-            val n = reader.read(buffer)
-            if (n < 0) break
-            // Embedded NUL would truncate the C-string based native parser.
-            if ((0 until n).any { buffer[it] == '\u0000' }) throw IOException("NUL in filter")
-            writer.write(buffer, 0, n)
-            total += n
+        try {
+            while (true) {
+                checkActive()
+                val n = reader.read(buffer)
+                if (n < 0) break
+                // Embedded NUL would truncate the C-string based native parser.
+                if ((0 until n).any { buffer[it] == '\u0000' }) {
+                    throw FilterDownloadException("NUL in filter", retryable = false)
+                }
+                writer.write(buffer, 0, n)
+                total += n
+            }
+        } catch (e: CharacterCodingException) {
+            // A different attempt would return the same bytes, so this is not worth retrying.
+            throw FilterDownloadException("Malformed filter text", retryable = false, e)
         }
-        if (total == 0L) throw IOException("Empty filter")
+        if (total == 0L) throw FilterDownloadException("Empty filter", retryable = false)
         writer.flush()
         checkActive()
     }
@@ -133,7 +199,19 @@ internal class FilterDownloader(
         return try {
             Charset.forName(name)
         } catch (e: IllegalArgumentException) {
-            throw IOException("Unsupported filter charset", e)
+            throw FilterDownloadException("Unsupported filter charset", retryable = false, e)
         }
+    }
+
+    private companion object {
+        /**
+         * Weak mobile links need considerably more patience than a Wi-Fi download: a 2G/3G
+         * connection regularly stalls for several seconds before a byte arrives. This is twice the
+         * previous budget while still bounding how long a cancelled download holds a shared permit.
+         */
+        const val CONNECT_TIMEOUT_MILLIS = 20_000
+        const val READ_TIMEOUT_MILLIS = 20_000
+        const val MAX_REDIRECTS = 10
+        val REDIRECT_STATUSES = listOf(301, 302, 303, 307, 308)
     }
 }
