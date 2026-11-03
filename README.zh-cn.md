@@ -55,7 +55,7 @@ allprojects {
 
 ```groovy
 dependencies {
-    implementation 'com.github.Gtaiqin.AdblockAndroid:ad-filter:1.1.3'
+    implementation 'com.github.Gtaiqin.AdblockAndroid:ad-filter:1.1.4'
 }
 ```
 
